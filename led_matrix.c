@@ -28,16 +28,6 @@ typedef enum {OFF = 0, ON = 1} LED_state;
 #define ENABLE_TRANSMITTING_SPI_GPIO_PERIPHERAL (RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE))
 #define ENABLE_TRANSMITTING_SPI_PERIPHERAL (RCC_APB2PeriphClockCmd(RCC_APB2Periph_SPI1, ENABLE))
 
-#define RECEIVING_SPI SPI2
-#define RECEIVING_SPI_GPIO_PORT GPIOB
-#define RECEIVING_SPI_GPIO_PERIPHERAL RCC_APB2Periph_GPIOB
-#define RECEIVING_SPI_MISO_PIN GPIO_Pin_14
-#define RECEIVING_SPI_MOSI_PIN GPIO_Pin_15
-#define RECEIVING_SPI_NSS_PIN GPIO_Pin_12
-#define RECEIVING_SPI_SCLK_PIN GPIO_Pin_13
-#define ENABLE_RECEIVING_SPI_GPIO_PERIPHERAL (RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE))
-#define ENABLE_RECEIVING_SPI_PERIPHERAL (RCC_APB1PeriphClockCmd(RCC_APB1Periph_SPI2, ENABLE));
-
 /* a timer is used to provide a primitive sleep() function */
 #define TIMER TIM6
 #define ENABLE_TIMER_PERIPHERAL (RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM6, ENABLE));
@@ -46,14 +36,25 @@ typedef enum {OFF = 0, ON = 1} LED_state;
    transmit more data over SPI. */
 enum {IDLE, DATA_TO_TRANSMIT, TRANSMITTING_DATA} state = IDLE;
 
+static uint8_t frame[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+
 static void configure_LED_GPIO_pins(void);
 static void configure_sleep_timer(void);
 static void configure_SPI(void);
 static void configure_system_ticks(void);
+static void draw_frame(void);
 static void set_LED(uint16_t led, LED_state state);
 static void sleep(uint16_t tenths_of_millisecond);
 static void toggle_LED(uint16_t led);
-static void transmit_and_receive_data(void);
+static void transmit_data(void);
 
 int
 main(int argc, char **argv) 
@@ -66,7 +67,8 @@ main(int argc, char **argv)
 	while (true) {
 		if (state == DATA_TO_TRANSMIT) {
 			state = TRANSMITTING_DATA;
-			transmit_and_receive_data();
+			draw_frame();
+			transmit_data();
 			state = IDLE;
 		}
 	}
@@ -113,7 +115,7 @@ configure_sleep_timer(void)
 
 	/* The timer runs at the system clock; dividing the system clock by 10000 gives
 	   .1 ms intervals. */
-	TIM_PrescalerConfig(TIMER, SystemCoreClock/10000, TIM_PSCReloadMode_Update);
+	TIM_PrescalerConfig(TIMER, SystemCoreClock/10000, TIM_PSCReloadMode_Immediate);
 	
 }
 
@@ -125,7 +127,6 @@ configure_SPI(void)
 {
 	/* Enable the GPIO peripheral; the GPIO peripheral must be enabled before it can be configured. */
 	ENABLE_TRANSMITTING_SPI_GPIO_PERIPHERAL;
-	ENABLE_RECEIVING_SPI_GPIO_PERIPHERAL;
 
 	GPIO_InitTypeDef gpio_configuration;
 	gpio_configuration.GPIO_Speed = GPIO_Speed_50MHz;
@@ -142,17 +143,8 @@ configure_SPI(void)
 	gpio_configuration.GPIO_Mode = GPIO_Mode_IN_FLOATING;
 	GPIO_Init(TRANSMITTING_SPI_GPIO_PORT, &gpio_configuration);
 
-	/* Configurre the GPIO pins for RECEIVING_SPI as a slave device.
-	   MOSI, NSS, & SCLK are configured as floating inputs;
-	   MISO is an alternate function push-pull output. */
-	gpio_configuration.GPIO_Pin = RECEIVING_SPI_MOSI_PIN |
-		RECEIVING_SPI_NSS_PIN | RECEIVING_SPI_SCLK_PIN;
-	gpio_configuration.GPIO_Mode = GPIO_Mode_IN_FLOATING;
-	GPIO_Init(RECEIVING_SPI_GPIO_PORT, &gpio_configuration);
-
 	/* Enable the SPI Peripherals; SPI ports must be enabled before they can be configured. */
 	ENABLE_TRANSMITTING_SPI_PERIPHERAL;
-	ENABLE_RECEIVING_SPI_PERIPHERAL;
 
 	/* Currently, both the TRANSMITTING_SPI and RECEIVING_SPI are configured
 	   in 2 line full duplex mode.  The baud rate is the system clock divided by
@@ -173,19 +165,32 @@ configure_SPI(void)
 	/* Configure the TRANSMITTING_SPI as a master device. */
 	spi_configuration.SPI_Mode = SPI_Mode_Master;
 	SPI_Init(TRANSMITTING_SPI, &spi_configuration);
-
-	/* Configure the RECEIVING_SPI as a slave device. */
-	spi_configuration.SPI_Mode = SPI_Mode_Slave;
-	SPI_Init(RECEIVING_SPI, &spi_configuration);
 }
 
 
 static void
 configure_system_ticks(void) {
-	/* configure the system tick handler to fire twice per second */
-	SysTick_Config(SystemCoreClock/2);
+	/* configure the system tick handler to fire thirty times per second */
+	SysTick_Config(SystemCoreClock/60);
 }
 
+static int next_index[] = { 8,  9, 58,  4,  5,  6,  7, 15,
+						   16, 17,  2,  3, 13, 14, 22, 23, 
+						   24, 25, 10, 11, 12,  1, 30, 31, 
+						   32, 33, 18, 19, 20, 21, 29, 39,
+						   40, 41, 26, 27, 28, 36, 37, 38,
+						   48, 49, 34, 35, 43, 44, 45, 46,
+						   47, 57, 42, 50, 51, 52, 53, 54,
+						   55, 56, 59, 60, 61, 62, 63,  0};
+
+static void
+draw_frame(void)
+{
+	static int index = 1;
+	frame[index]++;
+	frame[index] &= 0x03;
+	index = next_index[index];
+}
 
 /* 
 Forces one (or more) LEDs to be in the specified state, either ON or OFF.
@@ -216,52 +221,26 @@ toggle_LED(uint16_t led)
 	GPIO_SetBits(LED_GPIO_PORT, led & ~current_port_state);
 }
 
-/* data array to transmit */
-static uint8_t data[] = {0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
-						 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02,
-						 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
-						 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02,
-						 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
-						 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02,
-						 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
-						 0x00, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02};
-
-/* array to hold received result */
-static uint8_t received_data[sizeof(data)/sizeof(*data)];
-
 static void
-transmit_and_receive_data(void)
+transmit_data(void)
 {
-	/* overwrite the received data array with 0s */
-	 memset(received_data, 0, sizeof(received_data));
-
     SPI_SSOutputCmd(TRANSMITTING_SPI, ENABLE);
 	sleep(5);
 
-	SPI_Cmd(RECEIVING_SPI, ENABLE);
 	SPI_Cmd(TRANSMITTING_SPI, ENABLE);
 
-	for (unsigned int index = 0; index < sizeof(data)/sizeof(*data); index++) {
+	for (unsigned int index = 0; index < 64; index++) {
 		while (!SPI_I2S_GetFlagStatus(TRANSMITTING_SPI, SPI_I2S_FLAG_TXE)) { }
-		SPI_I2S_SendData(TRANSMITTING_SPI, data[index]);
-		while (!SPI_I2S_GetFlagStatus(RECEIVING_SPI, SPI_I2S_FLAG_RXNE)) { }
-		received_data[index] = SPI_I2S_ReceiveData(RECEIVING_SPI);
+		SPI_I2S_SendData(TRANSMITTING_SPI, frame[index]);
 	}
 
+	while (!SPI_I2S_GetFlagStatus(TRANSMITTING_SPI, SPI_I2S_FLAG_TXE)) { }
 	while (SPI_I2S_GetFlagStatus(TRANSMITTING_SPI, SPI_I2S_FLAG_BSY)) { }
-	while (SPI_I2S_GetFlagStatus(RECEIVING_SPI, SPI_I2S_FLAG_BSY)) { }
 
 	SPI_Cmd(TRANSMITTING_SPI, DISABLE);
-	SPI_Cmd(RECEIVING_SPI, DISABLE);
 
 	sleep(5);
 	SPI_SSOutputCmd(TRANSMITTING_SPI, DISABLE);
-		
-	if (memcmp(data, received_data, sizeof(data)) == 0) {
-		set_LED(GREEN_LED, OFF);
-	} else {
-		set_LED(GREEN_LED, ON);
-	}
 }
 
 /*
@@ -276,5 +255,6 @@ sleep(uint16_t tenths_of_millisecond)
 	   flag until the specified time has elapsed. */
 	TIM_SetAutoreload(TIMER, tenths_of_millisecond);
 	TIM_Cmd(TIMER, ENABLE);
+	TIM_ClearFlag(TIMER, TIM_FLAG_Update);
 	while (!TIM_GetFlagStatus(TIMER, TIM_FLAG_Update)) { }
 }
