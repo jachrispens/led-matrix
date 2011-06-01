@@ -45,16 +45,18 @@ static uint8_t frame[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 						  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+#define FRAME_LENGTH(frame) (sizeof(frame)/sizeof(frame[0]))
 
+static void clear_frame(unsigned int frame_length, uint8_t frame[frame_length]);
 static void configure_LED_GPIO_pins(void);
 static void configure_sleep_timer(void);
 static void configure_SPI(void);
 static void configure_system_ticks(void);
-static void draw_frame(void);
+static void draw_frame(unsigned int frame_length, uint8_t frame[frame_length]);
 static void set_LED(uint16_t led, LED_state state);
 static void sleep(uint16_t tenths_of_millisecond);
 static void toggle_LED(uint16_t led);
-static void transmit_data(void);
+static void transmit_frame_to_matrix(unsigned int frame_length, uint8_t frame[frame_length]);
 
 int
 main(int argc, char **argv) 
@@ -64,11 +66,13 @@ main(int argc, char **argv)
 	configure_LED_GPIO_pins();
 	configure_SPI();
 
+	clear_frame(FRAME_LENGTH(frame), frame);
+
 	while (true) {
 		if (state == DATA_TO_TRANSMIT) {
 			state = TRANSMITTING_DATA;
-			draw_frame();
-			transmit_data();
+			draw_frame(FRAME_LENGTH(frame), frame);
+			transmit_frame_to_matrix(FRAME_LENGTH(frame), frame);
 			state = IDLE;
 		}
 	}
@@ -80,6 +84,17 @@ SysTick_Handler(void)
 	toggle_LED(BLUE_LED);
 	if (state == IDLE) {
 		state = DATA_TO_TRANSMIT;
+	}
+}
+
+/*
+Clears a frame by setting all bytes to 0
+*/
+static void
+clear_frame(unsigned int frame_length, uint8_t frame[frame_length])
+{
+	for (unsigned int index; index < frame_length; index++) {
+		frame[index] = 0;
 	}
 }
 
@@ -132,16 +147,23 @@ configure_SPI(void)
 	gpio_configuration.GPIO_Speed = GPIO_Speed_50MHz;
 
 	/* Configure the GPIO pins for TRANSMITTING_SPI as a master device.  
-	   MOSI, NSS, & SCLK are configured as alternate function push-pull outputs; 
-	   MISO is a floating input. */
-	gpio_configuration.GPIO_Pin = TRANSMITTING_SPI_MOSI_PIN | 
-		TRANSMITTING_SPI_NSS_PIN | TRANSMITTING_SPI_SCLK_PIN;	
+	   MOSI & SCLK are configured as alternate function push-pull outputs; 
+	   MISO is a floating input. NSS is currently set as an normal output; the 
+	   transmit routine controls it directly. */
+	gpio_configuration.GPIO_Pin = TRANSMITTING_SPI_MOSI_PIN | TRANSMITTING_SPI_SCLK_PIN;	
 	gpio_configuration.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(TRANSMITTING_SPI_GPIO_PORT, &gpio_configuration);
 
 	gpio_configuration.GPIO_Pin = TRANSMITTING_SPI_MISO_PIN;
 	gpio_configuration.GPIO_Mode = GPIO_Mode_IN_FLOATING;
 	GPIO_Init(TRANSMITTING_SPI_GPIO_PORT, &gpio_configuration);
+
+	gpio_configuration.GPIO_Pin = TRANSMITTING_SPI_NSS_PIN;
+	gpio_configuration.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(TRANSMITTING_SPI_GPIO_PORT, &gpio_configuration);
+
+	/* Set the NSS pin high (it's active low) to indicate that the bus is free */
+	GPIO_SetBits(TRANSMITTING_SPI_GPIO_PORT, TRANSMITTING_SPI_NSS_PIN);
 
 	/* Enable the SPI Peripherals; SPI ports must be enabled before they can be configured. */
 	ENABLE_TRANSMITTING_SPI_PERIPHERAL;
@@ -170,26 +192,32 @@ configure_SPI(void)
 
 static void
 configure_system_ticks(void) {
-	/* configure the system tick handler to fire thirty times per second */
+	/* configure the system tick handler to fire sixty times per second */
 	SysTick_Config(SystemCoreClock/60);
 }
 
-static int next_index[] = { 8,  9, 58,  4,  5,  6,  7, 15,
-						   16, 17,  2,  3, 13, 14, 22, 23, 
-						   24, 25, 10, 11, 12,  1, 30, 31, 
-						   32, 33, 18, 19, 20, 21, 29, 39,
-						   40, 41, 26, 27, 28, 36, 37, 38,
-						   48, 49, 34, 35, 43, 44, 45, 46,
-						   47, 57, 42, 50, 51, 52, 53, 54,
-						   55, 56, 59, 60, 61, 62, 63,  0};
+/* 
+Maps the spiral path for the display
+*/
+static int spiral_path[] = {  1,  2,  3,  4,  5,  6,  7, 15,
+							  9, 10, 11, 12, 13, 14, 22, 23,
+							  8, 18, 19, 20, 21, 29, 30, 31,
+							 16, 17, 27, 28, 36, 37, 38, 39,
+							 24, 25, 26,  0, 35, 45, 46, 47,
+							 32, 33, 34, 42, 43, 44, 54, 55,
+							 40, 41, 49, 50, 51, 52, 53, 63,
+							 48, 56, 57, 58, 59, 60, 61, 62};
 
+/*
+Updates the frame (in place) to be the next frame to display
+*/
 static void
-draw_frame(void)
+draw_frame(unsigned int frame_length, uint8_t frame[frame_length])
 {
-	static int index = 1;
+	static int index = 0;
 	frame[index]++;
 	frame[index] &= 0x03;
-	index = next_index[index];
+	index = spiral_path[index];
 }
 
 /* 
@@ -221,15 +249,18 @@ toggle_LED(uint16_t led)
 	GPIO_SetBits(LED_GPIO_PORT, led & ~current_port_state);
 }
 
+
 static void
-transmit_data(void)
+transmit_frame_to_matrix(unsigned int frame_length, uint8_t frame[frame_length])
 {
-    SPI_SSOutputCmd(TRANSMITTING_SPI, ENABLE);
+	/* assume control of the bus; it's active low. */
+    GPIO_ResetBits(TRANSMITTING_SPI_GPIO_PORT, TRANSMITTING_SPI_NSS_PIN);
 	sleep(5);
 
+	SPI_SSOutputCmd(TRANSMITTING_SPI, ENABLE);
 	SPI_Cmd(TRANSMITTING_SPI, ENABLE);
 
-	for (unsigned int index = 0; index < 64; index++) {
+	for (unsigned int index = 0; index < frame_length; index++) {
 		while (!SPI_I2S_GetFlagStatus(TRANSMITTING_SPI, SPI_I2S_FLAG_TXE)) { }
 		SPI_I2S_SendData(TRANSMITTING_SPI, frame[index]);
 	}
@@ -238,9 +269,11 @@ transmit_data(void)
 	while (SPI_I2S_GetFlagStatus(TRANSMITTING_SPI, SPI_I2S_FLAG_BSY)) { }
 
 	SPI_Cmd(TRANSMITTING_SPI, DISABLE);
+	SPI_SSOutputCmd(TRANSMITTING_SPI, DISABLE);
 
 	sleep(5);
-	SPI_SSOutputCmd(TRANSMITTING_SPI, DISABLE);
+	/* release control of the bus; it's active low. */
+	GPIO_SetBits(TRANSMITTING_SPI_GPIO_PORT, TRANSMITTING_SPI_NSS_PIN);
 }
 
 /*
