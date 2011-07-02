@@ -1,0 +1,16 @@
+*.bak
+*.lst
+*.axf
+*.o
+~*
+*.htm
+*.opt
+*.uvopt
+*uvgui*
+*.map
+*.plg
+*.tra
+*.iex
+*.dep
+*.__i
+*.lnp
